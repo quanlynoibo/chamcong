@@ -870,10 +870,19 @@ function logout(){localStorage.removeItem('cc_sess');state.session=null;clearInt
 
 boot();
 
-// Đăng ký service worker để cài đặt như app (PWA)
+// Đăng ký service worker + TỰ CẬP NHẬT cho mọi máy đã cài
 if('serviceWorker' in navigator){
+  let refreshing=false;
+  const hadController=!!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{
+    if(refreshing || !hadController) return;   // lần cài đầu thì khỏi reload
+    refreshing=true; location.reload();        // có bản mới -> tự làm mới
+  });
   window.addEventListener('load',()=>{
-    navigator.serviceWorker.register('sw.js').catch(err=>console.warn('SW lỗi:',err));
+    navigator.serviceWorker.register('sw.js').then(reg=>{
+      reg.update();
+      setInterval(()=>reg.update(), 60000);    // kiểm tra bản mới mỗi 60 giây
+    }).catch(()=>{});
   });
 }
 </script>
