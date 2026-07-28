@@ -95,6 +95,13 @@
 
   /* Records / list */
   .rec{display:flex;align-items:center;gap:12px;padding:13px 4px;border-bottom:1px solid var(--line-2)}
+  .rec-click{cursor:pointer;border-radius:10px;transition:background .12s}
+  .rec-click:active{background:var(--line-2)}
+  .modal-bg{position:fixed;inset:0;background:rgba(20,32,46,.5);display:flex;align-items:flex-end;justify-content:center;z-index:200}
+  .modal{background:#fff;width:100%;max-width:460px;border-radius:20px 20px 0 0;padding:20px 18px calc(20px + env(safe-area-inset-bottom));max-height:88vh;overflow:auto;animation:slideup .2s ease}
+  @keyframes slideup{from{transform:translateY(30px)}to{transform:translateY(0)}}
+  textarea{width:100%;padding:12px 13px;border:1.5px solid var(--line);border-radius:11px;font-size:15px;font-family:inherit;background:#fff;color:var(--ink);resize:vertical;min-height:64px}
+  textarea:focus{outline:none;border-color:var(--brand)}
   .rec:last-child{border-bottom:none}
   .avatar{width:38px;height:38px;border-radius:11px;background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk';font-weight:600;font-size:15px;flex-shrink:0}
   .rec .nm{font-weight:600;font-size:14.5px}
@@ -558,19 +565,22 @@ function syncToSheet(payload){
 function rowOf(dk, empId, r){
   const emp=state.employees[empId]||{};
   const ws=state.config.workStart||'08:00';
+  const note=r.note||{};
   return {
     date: dk, empId,
     empName: emp.name || (state.session&&state.session.name) || '',
     checkIn: fmtTime(r.checkIn&&r.checkIn.time),
     checkOut: fmtTime(r.checkOut&&r.checkOut.time),
     status: r.checkIn ? (isLate(r.checkIn.time,ws)?'Trễ':'Đúng giờ') : 'Vắng',
-    overtime: fmtDur(overtimeMins(r.checkOut&&r.checkOut.time))
+    overtime: fmtDur(overtimeMins(r.checkOut&&r.checkOut.time)),
+    saidon: note.saidon || '',
+    nhacnho: note.nhacnho || ''
   };
 }
 function syncRecord(dk, empId){
   if(!(state.config&&state.config.sheetUrl)) return;
   db.ref(`records/${dk}/${empId}`).once('value').then(s=>{
-    const r=s.val(); if(!r||!r.checkIn) return;
+    const r=s.val(); if(!r||(!r.checkIn && !r.note)) return;
     syncToSheet(rowOf(dk,empId,r)).catch(()=>{});
   });
 }
@@ -633,9 +643,10 @@ function mgrToday(m){
     const rows=emps.map(([id,e])=>{
       const r=recs[id];
       if(r&&r.checkIn){present++; if(isLate(r.checkIn.time,ws))late++;
-        return recRow(e.name,r);}
-      return `<div class="rec"><div class="avatar" style="background:var(--line-2);color:var(--muted)">${initials(e.name)}</div>
-        <div><div class="nm">${e.name}</div><div class="sub">Chưa chấm công</div></div>
+        return recRow(e.name,r,todayKey(),id);}
+      const hasNote=r&&r.note&&(r.note.saidon||r.note.nhacnho);
+      return `<div class="rec rec-click" onclick="openNote('${todayKey()}','${id}')"><div class="avatar" style="background:var(--line-2);color:var(--muted)">${initials(e.name)}</div>
+        <div><div class="nm">${e.name}${hasNote?' 📝':''}</div><div class="sub">Chưa chấm công</div></div>
         <div class="times"><span class="badge absent">Vắng</span></div></div>`;
     }).join('');
     m.innerHTML=`
@@ -648,19 +659,53 @@ function mgrToday(m){
       <div class="card">${emps.length?rows:'<p class="muted center">Chưa có nhân viên</p>'}</div>`;
   });
 }
-function recRow(name,r){
+function recRow(name,r,dk,empId){
   const ws=state.config.workStart||'08:00';
   const late=isLate(r.checkIn.time,ws);
   const ot=overtimeMins(r.checkOut&&r.checkOut.time);
   const badge=late?'<span class="badge late">Trễ</span>':'<span class="badge ok">Đúng giờ</span>';
+  const note=r.note||{};
+  const hasNote=note.saidon||note.nhacnho;
   const otTxt=ot>0?`⏱ Tăng ca ${fmtDur(ot)}`:'Không tăng ca';
-  return `<div class="rec"><div class="avatar">${initials(name)}</div>
-    <div><div class="nm">${name}</div><div class="sub">${otTxt}</div></div>
+  return `<div class="rec rec-click" onclick="openNote('${dk}','${empId}')"><div class="avatar">${initials(name)}</div>
+    <div><div class="nm">${name}${hasNote?' 📝':''}</div><div class="sub">${otTxt}</div></div>
     <div class="times">
       <div class="t-in">${fmtTime(r.checkIn.time)} ${badge}</div>
       <div class="t-out">Ra ${fmtTime(r.checkOut&&r.checkOut.time)}</div>
     </div></div>`;
 }
+
+// Khung điền tay Sai đơn / Nhắc nhở cho 1 nhân viên trong 1 ngày
+function openNote(dk, empId){
+  const emp=state.employees[empId]||{};
+  db.ref(`records/${dk}/${empId}/note`).once('value').then(s=>{
+    const note=s.val()||{};
+    openModal(`
+      <div class="eyebrow" style="margin-bottom:4px">Ghi chú · ${dk}</div>
+      <h3 style="margin:0 0 14px">${emp.name||'Nhân viên'}</h3>
+      <div class="field"><label>Sai đơn</label><textarea id="nt_saidon" placeholder="VD: giao sai size, thiếu sản phẩm...">${(note.saidon||'').replace(/</g,'&lt;')}</textarea></div>
+      <div class="field"><label>Nhắc nhở</label><textarea id="nt_nhacnho" placeholder="VD: nhắc tác phong, đi trễ nhiều...">${(note.nhacnho||'').replace(/</g,'&lt;')}</textarea></div>
+      <div class="row" style="margin-top:4px">
+        <button class="btn ghost" onclick="closeModal()">Đóng</button>
+        <button class="btn primary" id="nt_save">Lưu</button>
+      </div>`);
+    document.getElementById('nt_save').onclick=()=>{
+      const data={saidon:val('nt_saidon'), nhacnho:val('nt_nhacnho')};
+      db.ref(`records/${dk}/${empId}/note`).set(data).then(()=>{
+        toast('Đã lưu ghi chú');
+        syncRecord(dk,empId);   // đẩy luôn lên Google Sheet nếu có cài
+        closeModal();
+      }).catch(e=>toast('Lỗi lưu: '+e.message));
+    };
+  });
+}
+function openModal(html){
+  let root=document.getElementById('modalRoot');
+  if(!root){ root=document.createElement('div'); root.id='modalRoot'; document.body.appendChild(root); }
+  root.innerHTML=`<div class="modal-bg" id="modalBg"><div class="modal">${html}</div></div>`;
+  document.getElementById('modalBg').onclick=e=>{ if(e.target.id==='modalBg') closeModal(); };
+}
+function closeModal(){ const r=document.getElementById('modalRoot'); if(r) r.innerHTML=''; }
 
 // --- Lịch sử ---
 function mgrHistory(m){
@@ -676,8 +721,9 @@ function mgrHistory(m){
       const emps=Object.entries(state.employees);
       const rows=emps.map(([id,e])=>{
         const r=recs[id];
-        if(r&&r.checkIn) return recRow(e.name,r);
-        return `<div class="rec"><div class="avatar" style="background:var(--line-2);color:var(--muted)">${initials(e.name)}</div><div><div class="nm">${e.name}</div><div class="sub">—</div></div><div class="times"><span class="badge absent">Vắng</span></div></div>`;
+        if(r&&r.checkIn) return recRow(e.name,r,dk,id);
+        const hasNote=r&&r.note&&(r.note.saidon||r.note.nhacnho);
+        return `<div class="rec rec-click" onclick="openNote('${dk}','${id}')"><div class="avatar" style="background:var(--line-2);color:var(--muted)">${initials(e.name)}</div><div><div class="nm">${e.name}${hasNote?' 📝':''}</div><div class="sub">—</div></div><div class="times"><span class="badge absent">Vắng</span></div></div>`;
       }).join('');
       document.getElementById('h_body').innerHTML=`<div class="card">${emps.length?rows:'<p class="muted center">Chưa có dữ liệu</p>'}</div>`;
       document.getElementById('h_export').onclick=()=>exportCSV(dk,recs);
@@ -692,7 +738,7 @@ function syncDay(dk,recs){
   const records=[];
   Object.entries(state.employees).forEach(([id,e])=>{
     const r=recs[id];
-    if(r&&r.checkIn) records.push(rowOf(dk,id,r));
+    if(r&&(r.checkIn || r.note)) records.push(rowOf(dk,id,r));
   });
   if(!records.length) return toast('Ngày này không có dữ liệu');
   toast('Đang đồng bộ…');
@@ -701,16 +747,17 @@ function syncDay(dk,recs){
 }
 function exportCSV(dk,recs){
   const ws=state.config.workStart||'08:00';
+  const q=v=>{v=String(v==null?'':v); return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
   let csv='Ngày,Nhân viên,Giờ vào,Giờ ra,Trạng thái,Tăng ca,Sai đơn,Nhắc nhở,Thưởng chuyên cần\n';
   Object.entries(state.employees).forEach(([id,e])=>{
-    const r=recs[id];
+    const r=recs[id]; const note=(r&&r.note)||{};
     let cols;
     if(r&&r.checkIn){
       const st=isLate(r.checkIn.time,ws)?'Trễ':'Đúng giờ';
       const ot=fmtDur(overtimeMins(r.checkOut&&r.checkOut.time));
-      cols=[dk,e.name,fmtTime(r.checkIn.time),fmtTime(r.checkOut&&r.checkOut.time),st,ot,'','',''];
-    }else cols=[dk,e.name,'','','Vắng','','','',''];
-    csv+=cols.join(',')+'\n';
+      cols=[dk,e.name,fmtTime(r.checkIn.time),fmtTime(r.checkOut&&r.checkOut.time),st,ot,note.saidon||'',note.nhacnho||'',''];
+    }else cols=[dk,e.name,'','','Vắng','',note.saidon||'',note.nhacnho||'',''];
+    csv+=cols.map(q).join(',')+'\n';
   });
   const blob=new Blob(["\ufeff"+csv],{type:'text/csv;charset=utf-8'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`chamcong_${dk}.csv`;a.click();
