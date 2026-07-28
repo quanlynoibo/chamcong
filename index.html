@@ -693,7 +693,6 @@ function openNote(dk, empId){
       const data={saidon:val('nt_saidon'), nhacnho:val('nt_nhacnho')};
       db.ref(`records/${dk}/${empId}/note`).set(data).then(()=>{
         toast('Đã lưu ghi chú');
-        syncRecord(dk,empId);   // đẩy luôn lên Google Sheet nếu có cài
         closeModal();
       }).catch(e=>toast('Lỗi lưu: '+e.message));
     };
