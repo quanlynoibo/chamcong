@@ -189,15 +189,25 @@ function parseLatLng(str){
   }
   return null;
 }
-// Lấy vị trí hiện tại (Promise)
+// Lấy vị trí: đo NHIỀU LẦN trong ~8 giây, chỉ giữ lần CHÍNH XÁC NHẤT (sai số nhỏ nhất)
 function getPosition(){
   return new Promise((res,rej)=>{
     if(!navigator.geolocation) return rej(new Error('Thiết bị không hỗ trợ GPS'));
-    navigator.geolocation.getCurrentPosition(
-      p=>res({lat:p.coords.latitude,lng:p.coords.longitude,acc:Math.round(p.coords.accuracy)}),
-      e=>rej(e),
-      {enableHighAccuracy:true,timeout:12000,maximumAge:0}
-    );
+    let best=null, done=false, watchId=null, timer=null;
+    const finish=()=>{
+      if(done) return; done=true;
+      if(watchId!=null) navigator.geolocation.clearWatch(watchId);
+      clearTimeout(timer);
+      if(best) res({lat:best.coords.latitude,lng:best.coords.longitude,acc:Math.round(best.coords.accuracy)});
+      else rej(new Error('Quá thời gian định vị'));
+    };
+    watchId=navigator.geolocation.watchPosition(p=>{
+      if(!best || p.coords.accuracy < best.coords.accuracy) best=p;  // giữ lần sai số nhỏ nhất
+      if(best.coords.accuracy <= 25) finish();                       // đủ tốt (≤25m) thì chốt sớm
+    }, e=>{
+      if(!best){ done=true; clearTimeout(timer); if(watchId!=null) navigator.geolocation.clearWatch(watchId); rej(e); }
+    }, {enableHighAccuracy:true, timeout:20000, maximumAge:0});
+    timer=setTimeout(finish, 8000);   // hết 8 giây thì dùng lần đo tốt nhất đã có
   });
 }
 const pad=n=>String(n).padStart(2,'0');
@@ -534,8 +544,35 @@ function punch(kind){
   };
   db.ref(`records/${todayKey()}/${state.session.empId}/${kind}`).set(rec).then(()=>{
     toast(kind==='checkIn'?'✅ Đã chấm công vào':'🔴 Đã chấm công ra');
+    syncRecord(todayKey(), state.session.empId);   // đẩy lên Google Sheet (nếu có cài)
     locateAndRender();
   }).catch(e=>toast('Lỗi ghi: '+e.message));
+}
+
+// Gửi 1 bản ghi lên Google Sheet qua Apps Script (chạy ngầm, không chặn giao diện)
+function syncToSheet(payload){
+  const url = state.config && state.config.sheetUrl;
+  if(!url) return Promise.resolve();
+  return fetch(url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
+}
+function rowOf(dk, empId, r){
+  const emp=state.employees[empId]||{};
+  const ws=state.config.workStart||'08:00';
+  return {
+    date: dk, empId,
+    empName: emp.name || (state.session&&state.session.name) || '',
+    checkIn: fmtTime(r.checkIn&&r.checkIn.time),
+    checkOut: fmtTime(r.checkOut&&r.checkOut.time),
+    status: r.checkIn ? (isLate(r.checkIn.time,ws)?'Trễ':'Đúng giờ') : 'Vắng',
+    overtime: fmtDur(overtimeMins(r.checkOut&&r.checkOut.time))
+  };
+}
+function syncRecord(dk, empId){
+  if(!(state.config&&state.config.sheetUrl)) return;
+  db.ref(`records/${dk}/${empId}`).once('value').then(s=>{
+    const r=s.val(); if(!r||!r.checkIn) return;
+    syncToSheet(rowOf(dk,empId,r)).catch(()=>{});
+  });
 }
 
 function watchMyToday(){
@@ -630,7 +667,8 @@ function mgrHistory(m){
   m.innerHTML=`
     <div class="field"><label>Chọn ngày</label><input type="date" id="h_date" value="${todayKey()}"></div>
     <div id="h_body"></div>
-    <button class="btn ghost" id="h_export" style="margin-top:14px">⬇️ Xuất CSV ngày này</button>`;
+    <button class="btn primary" id="h_sync" style="margin-top:14px">🔄 Đồng bộ ngày này lên Google Sheet</button>
+    <button class="btn ghost" id="h_export" style="margin-top:10px">⬇️ Xuất CSV ngày này</button>`;
   const load=()=>{
     const dk=val('h_date');
     db.ref(`records/${dk}`).once('value').then(snap=>{
@@ -643,20 +681,36 @@ function mgrHistory(m){
       }).join('');
       document.getElementById('h_body').innerHTML=`<div class="card">${emps.length?rows:'<p class="muted center">Chưa có dữ liệu</p>'}</div>`;
       document.getElementById('h_export').onclick=()=>exportCSV(dk,recs);
+      document.getElementById('h_sync').onclick=()=>syncDay(dk,recs);
     });
   };
   document.getElementById('h_date').onchange=load; load();
 }
-function exportCSV(dk,recs){
-  const ws=state.config.workStart||'08:00';
-  let csv='Ngày,Nhân viên,Giờ vào,Giờ ra,Trạng thái,Tăng ca,Thưởng chuyên cần\n';
+// Đẩy toàn bộ dữ liệu 1 ngày lên Google Sheet
+function syncDay(dk,recs){
+  if(!(state.config&&state.config.sheetUrl)) return toast('Chưa cài link Google Sheet trong Cài đặt');
+  const records=[];
   Object.entries(state.employees).forEach(([id,e])=>{
     const r=recs[id];
+    if(r&&r.checkIn) records.push(rowOf(dk,id,r));
+  });
+  if(!records.length) return toast('Ngày này không có dữ liệu');
+  toast('Đang đồng bộ…');
+  syncToSheet({records}).then(()=>toast('✅ Đã đồng bộ lên Google Sheet'))
+    .catch(()=>toast('⚠️ Lỗi đồng bộ, kiểm tra lại link'));
+}
+function exportCSV(dk,recs){
+  const ws=state.config.workStart||'08:00';
+  let csv='Ngày,Nhân viên,Giờ vào,Giờ ra,Trạng thái,Tăng ca,Sai đơn,Nhắc nhở,Thưởng chuyên cần\n';
+  Object.entries(state.employees).forEach(([id,e])=>{
+    const r=recs[id];
+    let cols;
     if(r&&r.checkIn){
       const st=isLate(r.checkIn.time,ws)?'Trễ':'Đúng giờ';
       const ot=fmtDur(overtimeMins(r.checkOut&&r.checkOut.time));
-      csv+=`${dk},${e.name},${fmtTime(r.checkIn.time)},${fmtTime(r.checkOut&&r.checkOut.time)},${st},${ot},\n`;
-    }else csv+=`${dk},${e.name},,,Vắng,,\n`;
+      cols=[dk,e.name,fmtTime(r.checkIn.time),fmtTime(r.checkOut&&r.checkOut.time),st,ot,'','',''];
+    }else cols=[dk,e.name,'','','Vắng','','','',''];
+    csv+=cols.join(',')+'\n';
   });
   const blob=new Blob(["\ufeff"+csv],{type:'text/csv;charset=utf-8'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`chamcong_${dk}.csv`;a.click();
@@ -705,6 +759,13 @@ function mgrSettings(m){
       </div>
     </div>
 
+    <div class="card" style="margin-bottom:16px">
+      <div class="eyebrow">Google Sheet (tự đồng bộ)</div>
+      <div class="field"><label>Dán link Apps Script (…/exec)</label><input id="cf_sheet" placeholder="https://script.google.com/macros/s/..../exec" value="${state.config.sheetUrl||''}"></div>
+      <button class="btn ghost" id="cf_savesheet" style="width:auto;padding:12px 26px">Lưu link</button>
+      <p class="muted" style="margin:10px 0 0;font-size:12px">Có link rồi thì mỗi lần chấm công dữ liệu tự ghi vào Sheet. Để trống = tắt.</p>
+    </div>
+
     <div class="list-head"><h3>Vị trí chấm công (${locs.length})</h3></div>
     <div class="card" style="margin-bottom:16px">
       ${locs.map(([id,l])=>`<div class="emp-item">
@@ -726,6 +787,7 @@ function mgrSettings(m){
     </div>`;
 
   document.getElementById('cf_savestart').onclick=()=>db.ref('config/workStart').set(val('cf_start')||'08:00').then(()=>toast('Đã lưu giờ vào chuẩn'));
+  document.getElementById('cf_savesheet').onclick=()=>db.ref('config/sheetUrl').set(val('cf_sheet')).then(()=>toast(val('cf_sheet')?'Đã lưu link Google Sheet':'Đã tắt đồng bộ Sheet'));
   m.querySelectorAll('[data-dell]').forEach(b=>b.onclick=()=>{
     if(Object.keys(state.config.locations).length<=1) return toast('Phải còn ít nhất 1 vị trí');
     if(confirm('Xoá vị trí này?')) db.ref('config/locations/'+b.dataset.dell).remove();
