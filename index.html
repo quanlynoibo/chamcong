@@ -569,8 +569,8 @@ function rowOf(dk, empId, r){
   return {
     date: dk, empId,
     empName: emp.name || (state.session&&state.session.name) || '',
-    checkIn: fmtTime(r.checkIn&&r.checkIn.time),
-    checkOut: fmtTime(r.checkOut&&r.checkOut.time),
+    checkIn: r.checkIn ? fmtTime(r.checkIn.time) : '',
+    checkOut: r.checkOut ? fmtTime(r.checkOut.time) : '',
     status: r.checkIn ? (isLate(r.checkIn.time,ws)?'Trễ':'Đúng giờ') : 'Vắng',
     overtime: fmtDur(overtimeMins(r.checkOut&&r.checkOut.time)),
     saidon: note.saidon || '',
@@ -712,7 +712,7 @@ function mgrHistory(m){
     <div class="field"><label>Chọn ngày</label><input type="date" id="h_date" value="${todayKey()}"></div>
     <div id="h_body"></div>
     <button class="btn primary" id="h_sync" style="margin-top:14px">🔄 Đồng bộ ngày này lên Google Sheet</button>
-    <button class="btn ghost" id="h_export" style="margin-top:10px">⬇️ Xuất CSV ngày này</button>`;
+    <button class="btn dark" id="h_syncall" style="margin-top:10px">☁️ Đồng bộ TẤT CẢ (mọi ngày & nhân viên)</button>`;
   const load=()=>{
     const dk=val('h_date');
     db.ref(`records/${dk}`).once('value').then(snap=>{
@@ -725,8 +725,8 @@ function mgrHistory(m){
         return `<div class="rec rec-click" onclick="openNote('${dk}','${id}')"><div class="avatar" style="background:var(--line-2);color:var(--muted)">${initials(e.name)}</div><div><div class="nm">${e.name}${hasNote?' 📝':''}</div><div class="sub">—</div></div><div class="times"><span class="badge absent">Vắng</span></div></div>`;
       }).join('');
       document.getElementById('h_body').innerHTML=`<div class="card">${emps.length?rows:'<p class="muted center">Chưa có dữ liệu</p>'}</div>`;
-      document.getElementById('h_export').onclick=()=>exportCSV(dk,recs);
       document.getElementById('h_sync').onclick=()=>syncDay(dk,recs);
+      document.getElementById('h_syncall').onclick=()=>syncAll();
     });
   };
   document.getElementById('h_date').onchange=load; load();
@@ -736,30 +736,37 @@ function syncDay(dk,recs){
   if(!(state.config&&state.config.sheetUrl)) return toast('Chưa cài link Google Sheet trong Cài đặt');
   const records=[];
   Object.entries(state.employees).forEach(([id,e])=>{
-    const r=recs[id];
-    if(r&&(r.checkIn || r.note)) records.push(rowOf(dk,id,r));
+    const r=recs[id] || {};           // không có bản ghi -> vẫn đẩy, đánh dấu Vắng
+    records.push(rowOf(dk,id,r));
   });
-  if(!records.length) return toast('Ngày này không có dữ liệu');
+  if(!records.length) return toast('Chưa có nhân viên nào');
   toast('Đang đồng bộ…');
   syncToSheet({records}).then(()=>toast('✅ Đã đồng bộ lên Google Sheet'))
     .catch(()=>toast('⚠️ Lỗi đồng bộ, kiểm tra lại link'));
 }
-function exportCSV(dk,recs){
-  const ws=state.config.workStart||'08:00';
-  const q=v=>{v=String(v==null?'':v); return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
-  let csv='Ngày,Nhân viên,Giờ vào,Giờ ra,Trạng thái,Tăng ca,Sai đơn,Nhắc nhở,Thưởng chuyên cần\n';
-  Object.entries(state.employees).forEach(([id,e])=>{
-    const r=recs[id]; const note=(r&&r.note)||{};
-    let cols;
-    if(r&&r.checkIn){
-      const st=isLate(r.checkIn.time,ws)?'Trễ':'Đúng giờ';
-      const ot=fmtDur(overtimeMins(r.checkOut&&r.checkOut.time));
-      cols=[dk,e.name,fmtTime(r.checkIn.time),fmtTime(r.checkOut&&r.checkOut.time),st,ot,note.saidon||'',note.nhacnho||'',''];
-    }else cols=[dk,e.name,'','','Vắng','',note.saidon||'',note.nhacnho||'',''];
-    csv+=cols.map(q).join(',')+'\n';
-  });
-  const blob=new Blob(["\ufeff"+csv],{type:'text/csv;charset=utf-8'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`chamcong_${dk}.csv`;a.click();
+// Đồng bộ TẤT CẢ nhân viên của MỌI ngày
+function syncAll(){
+  if(!(state.config&&state.config.sheetUrl)) return toast('Chưa cài link Google Sheet trong Cài đặt');
+  toast('Đang đồng bộ tất cả…');
+  db.ref('records').once('value').then(snap=>{
+    const all=snap.val()||{};
+    const records=[];
+    Object.entries(all).forEach(([dk,dayRecs])=>{
+      Object.entries(dayRecs||{}).forEach(([empId,r])=>{
+        if(state.employees[empId] && (r.checkIn || r.note)) records.push(rowOf(dk,empId,r));
+      });
+    });
+    if(!records.length) return toast('Không có dữ liệu để đồng bộ');
+    sendBatches(records,0,records.length);
+  }).catch(()=>toast('⚠️ Không đọc được dữ liệu'));
+}
+function sendBatches(records,i,total){
+  const SIZE=300;
+  const chunk=records.slice(i,i+SIZE);
+  if(!chunk.length){ toast('✅ Đã đồng bộ tất cả ('+total+' dòng)'); return; }
+  syncToSheet({records:chunk})
+    .then(()=>sendBatches(records,i+SIZE,total))
+    .catch(()=>toast('⚠️ Lỗi đồng bộ, kiểm tra lại link'));
 }
 
 // --- Nhân viên ---
