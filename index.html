@@ -424,9 +424,11 @@ function renderLogin(){
    ============================================================ */
 function renderEmployee(){
   const s=state.session;
+  const canLogout = state.employees[s.empId] && state.employees[s.empId].canLogout;
   APP.innerHTML=`
   <div class="topbar">
     <div class="co">${state.config.company}<small>Xin chào, ${s.name}</small></div>
+    ${canLogout?'<button class="icon-btn" id="logout">⏻</button>':''}
   </div>
   <main>
     <div class="clock mono" id="clock">--:--:--</div>
@@ -449,6 +451,7 @@ function renderEmployee(){
     <div id="myToday" style="margin-top:16px"></div>
   </main>`;
 
+  if(canLogout){ const lo=document.getElementById('logout'); if(lo) lo.onclick=logout; }
   startClock();
   locateAndRender();
   watchMyToday();
@@ -854,11 +857,13 @@ function mgrEmployees(m){
     <div class="list-head"><h3>Danh sách (${emps.length})</h3></div>
     <div class="card">${emps.length?emps.map(([id,e])=>`
       <div class="emp-item"><div class="avatar" style="${e.active===false?'opacity:.4':''}">${initials(e.name)}</div>
-        <div><div class="nm">${e.name}</div><div class="sub">PIN: ${e.pin} ${e.active===false?'· đã khoá':''}</div></div>
+        <div><div class="nm">${e.name}</div><div class="sub">PIN: ${e.pin}${e.active===false?' · đã khoá':''}${e.canLogout?' · được đăng xuất':''}</div></div>
         <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="icon-btn" title="Cho phép đăng xuất" style="background:${e.canLogout?'var(--present-bg)':'var(--line-2)'};color:${e.canLogout?'#137a3c':'var(--muted)'}" data-lo="${id}">🚪</button>
           <button class="icon-btn" style="background:var(--line-2);color:var(--ink)" data-tog="${id}">${e.active===false?'🔓':'🔒'}</button>
           <button class="icon-btn" style="background:var(--away-bg);color:var(--away)" data-del="${id}">🗑</button>
-        </div></div>`).join(''):'<p class="muted center">Chưa có nhân viên</p>'}</div>`;
+        </div></div>`).join(''):'<p class="muted center">Chưa có nhân viên</p>'}</div>
+    <p class="muted" style="font-size:12px;margin-top:8px">🚪 = cho phép nhân viên đó tự đăng xuất (VD người cầm mật khẩu quản lý). Còn lại không có nút đăng xuất.</p>`;
   document.getElementById('e_add').onclick=()=>{
     const n=val('e_name'),p=val('e_pin');
     if(!n||!p) return toast('Nhập tên và PIN');
@@ -869,6 +874,9 @@ function mgrEmployees(m){
   });
   m.querySelectorAll('[data-tog]').forEach(b=>b.onclick=()=>{
     const e=state.employees[b.dataset.tog]; db.ref('employees/'+b.dataset.tog+'/active').set(e.active===false);
+  });
+  m.querySelectorAll('[data-lo]').forEach(b=>b.onclick=()=>{
+    const e=state.employees[b.dataset.lo]; db.ref('employees/'+b.dataset.lo+'/canLogout').set(!e.canLogout);
   });
 }
 
