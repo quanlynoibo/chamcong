@@ -427,7 +427,6 @@ function renderEmployee(){
   APP.innerHTML=`
   <div class="topbar">
     <div class="co">${state.config.company}<small>Xin chào, ${s.name}</small></div>
-    <button class="icon-btn" id="logout">⏻</button>
   </div>
   <main>
     <div class="clock mono" id="clock">--:--:--</div>
@@ -450,7 +449,6 @@ function renderEmployee(){
     <div id="myToday" style="margin-top:16px"></div>
   </main>`;
 
-  document.getElementById('logout').onclick=logout;
   startClock();
   locateAndRender();
   watchMyToday();
@@ -613,6 +611,7 @@ function renderManager(){
   <main id="mgrMain"></main>
   <div class="tabbar">
     <button data-t="today"><span class="ic">📋</span>Hôm nay</button>
+    <button data-t="proxy"><span class="ic">✋</span>Chấm hộ</button>
     <button data-t="history"><span class="ic">📅</span>Lịch sử</button>
     <button data-t="emps"><span class="ic">👥</span>Nhân viên</button>
     <button data-t="settings"><span class="ic">⚙️</span>Cài đặt</button>
@@ -626,9 +625,82 @@ function paintTabs(){document.querySelectorAll('.tabbar button').forEach(b=>b.cl
 function renderMgrTab(){
   const m=document.getElementById('mgrMain');
   if(state.tab==='today') return mgrToday(m);
+  if(state.tab==='proxy') return mgrProxy(m);
   if(state.tab==='history') return mgrHistory(m);
   if(state.tab==='emps') return mgrEmployees(m);
   if(state.tab==='settings') return mgrSettings(m);
+}
+
+// --- Chấm công hộ (quản lý chấm thay, vẫn cần GPS tại cửa hàng) ---
+function mgrProxy(m){
+  const emps=Object.entries(state.employees).filter(([,e])=>e.active!==false);
+  m.innerHTML=`
+    <div class="card">
+      <div class="eyebrow">Chấm công hộ</div>
+      <p class="muted" style="margin-top:0;font-size:13px">Chọn nhân viên rồi chấm thay. Phải đứng trong khu vực cửa hàng (GPS) mới chấm được.</p>
+      <div class="field"><label>Nhân viên</label>
+        <select id="px_emp"><option value="">— Chọn nhân viên —</option>${emps.map(([id,e])=>`<option value="${id}">${e.name}</option>`).join('')}</select>
+      </div>
+      <button class="btn ghost" id="px_loc" style="margin-bottom:10px">📍 Định vị cửa hàng</button>
+      <div id="px_status" class="center" style="margin-bottom:12px"><span class="muted">Bấm định vị để bắt đầu</span></div>
+      <div id="px_actions"></div>
+    </div>`;
+
+  let geo=null, nearest=null, dist=null;
+  const inside=()=> nearest && dist<=nearest.loc.radius;
+  const locBtn=document.getElementById('px_loc');
+
+  locBtn.onclick=async()=>{
+    locBtn.textContent='📡 Đang định vị…'; locBtn.disabled=true;
+    document.getElementById('px_status').innerHTML='<span class="muted">📡 Đang lấy vị trí…</span>';
+    try{
+      const p=await getPosition(); geo=p;
+      const locs=Object.values(state.config.locations||{});
+      let best=null; locs.forEach(l=>{const d=distanceM(p.lat,p.lng,l.lat,l.lng); if(!best||d<best.dist)best={loc:l,dist:d};});
+      nearest=best; dist=best.dist;
+      document.getElementById('px_status').innerHTML = inside()
+        ? `<span class="status-pill present">✅ Trong khu vực · ${best.dist}m</span>`
+        : `<span class="status-pill away">📍 Ngoài khu vực · ${best.dist}m (cho phép ${best.loc.radius}m)</span>`;
+      renderPxActions();
+    }catch(err){ document.getElementById('px_status').innerHTML='<span class="status-pill away">⚠️ '+geoErr(err)+'</span>'; }
+    locBtn.textContent='🔄 Định vị lại'; locBtn.disabled=false;
+  };
+
+  document.getElementById('px_emp').onchange=renderPxActions;
+
+  function renderPxActions(){
+    const area=document.getElementById('px_actions');
+    const empId=val('px_emp');
+    if(!empId){ area.innerHTML='<p class="muted center">Chọn nhân viên ở trên</p>'; return; }
+    if(!geo){ area.innerHTML='<p class="muted center">Bấm “Định vị cửa hàng”</p>'; return; }
+    db.ref(`records/${todayKey()}/${empId}`).once('value').then(s=>{
+      const rec=s.val()||{}; const ok=inside();
+      let html='';
+      if(!rec.checkIn){
+        html=`<button class="btn primary" id="px_in" ${ok?'':'disabled'}>🟢 Chấm công VÀO hộ</button>`;
+      }else if(!rec.checkOut){
+        html=`<div class="card" style="padding:12px;margin-bottom:10px"><span class="muted">Đã vào lúc</span> <b class="mono">${fmtTime(rec.checkIn.time)}</b></div>
+              <button class="btn dark" id="px_out" ${ok?'':'disabled'}>🔴 Chấm công RA hộ</button>`;
+      }else{
+        html=`<div class="card center"><b>✅ Hôm nay đã đủ vào/ra</b><div class="muted" style="margin-top:4px">Vào ${fmtTime(rec.checkIn.time)} · Ra ${fmtTime(rec.checkOut.time)}</div></div>`;
+      }
+      if(!ok && (!rec.checkIn||!rec.checkOut)) html+='<p class="muted center" style="margin-top:8px">Cần ở trong khu vực để chấm</p>';
+      area.innerHTML=html;
+      const bi=document.getElementById('px_in'), bo=document.getElementById('px_out');
+      if(bi) bi.onclick=()=>proxyPunch(empId,'checkIn');
+      if(bo) bo.onclick=()=>proxyPunch(empId,'checkOut');
+    });
+  }
+
+  function proxyPunch(empId,kind){
+    if(!inside()){ toast('Đang ngoài khu vực cửa hàng'); return; }
+    const rec={ time:firebase.database.ServerValue.TIMESTAMP, lat:geo.lat, lng:geo.lng, acc:geo.acc,
+                distance:dist, locName:nearest.loc.name, proxy:true };
+    db.ref(`records/${todayKey()}/${empId}/${kind}`).set(rec).then(()=>{
+      toast(kind==='checkIn'?'✅ Đã chấm vào hộ':'🔴 Đã chấm ra hộ');
+      renderPxActions();
+    }).catch(e=>toast('Lỗi: '+e.message));
+  }
 }
 
 // --- Hôm nay ---
