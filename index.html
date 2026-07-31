@@ -552,7 +552,6 @@ function punch(kind){
   };
   db.ref(`records/${todayKey()}/${state.session.empId}/${kind}`).set(rec).then(()=>{
     toast(kind==='checkIn'?'✅ Đã chấm công vào':'🔴 Đã chấm công ra');
-    syncRecord(todayKey(), state.session.empId);   // đẩy lên Google Sheet (nếu có cài)
     locateAndRender();
   }).catch(e=>toast('Lỗi ghi: '+e.message));
 }
@@ -578,14 +577,6 @@ function rowOf(dk, empId, r){
     nhacnho: note.nhacnho || ''
   };
 }
-function syncRecord(dk, empId){
-  if(!(state.config&&state.config.sheetUrl)) return;
-  db.ref(`records/${dk}/${empId}`).once('value').then(s=>{
-    const r=s.val(); if(!r||(!r.checkIn && !r.note)) return;
-    syncToSheet(rowOf(dk,empId,r)).catch(()=>{});
-  });
-}
-
 function watchMyToday(){
   db.ref(`records/${todayKey()}/${state.session.empId}`).on('value',snap=>{
     const el=document.getElementById('myToday'); if(!el)return;
