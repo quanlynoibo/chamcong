@@ -557,10 +557,10 @@ function punch(kind){
 }
 
 // Gửi 1 bản ghi lên Google Sheet qua Apps Script (chạy ngầm, không chặn giao diện)
-function syncToSheet(payload){
-  const url = state.config && state.config.sheetUrl;
-  if(!url) return Promise.resolve();
-  return fetch(url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
+async function syncToSheet(payload){
+  const url=state.config&&state.config.sheetUrl;
+  const tasks=[(async()=>{if(!url)throw Error('Chưa cài link Google Sheet');let r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});if(!r.ok)throw Error('Google Sheet trả lỗi');let txt=await r.text();try{let body=JSON.parse(txt);if(body.error||body.success===false||body.ok===false)throw Error('Google Sheet chưa nhận dữ liệu');}catch(e){if(e.message==='Google Sheet chưa nhận dữ liệu')throw e;}return true;})(),(async()=>{if(!db)throw Error('Chưa kết nối nguồn chấm công');let updates={};for(let r of payload.records){if(!/^\d{4}-\d{2}-\d{2}$/.test(r.date)||!r.empId||/[.#$\[\]\/]/.test(r.empId))throw Error('Mã nhân viên / ngày không hợp lệ');updates[r.date+'/'+r.empId]={empName:r.empName,checkInTs:r.checkInTs??null,checkOutTs:r.checkOutTs??null,breakMinutes:0,punctuality:r.status||'',overtimeMinutes:r.overtimeMinutes||0,saidon:r.saidon||'',nhacnho:r.nhacnho||'',attendanceBonus:0,location:r.location||'',note:[r.saidon,r.nhacnho].filter(Boolean).join(' · '),publishedAt:firebase.database.ServerValue.TIMESTAMP};}await db.ref('changChangPublished').update(updates);return true;})()];
+  const result=await Promise.allSettled(tasks);if(result.some(r=>r.status==='rejected'))throw Error('Google Sheet: '+(result[0].status==='fulfilled'?'đã gửi':'lỗi')+' · Web CHANG CHANG: '+(result[1].status==='fulfilled'?'đã gửi':'lỗi')+'. Có thể bấm gửi lại; web không cộng trùng công.');return true;
 }
 function rowOf(dk, empId, r){
   const emp=state.employees[empId]||{};
@@ -568,11 +568,13 @@ function rowOf(dk, empId, r){
   const note=r.note||{};
   return {
     date: dk, empId,
+    checkInTs:r.checkIn&&r.checkIn.time||null,checkOutTs:r.checkOut&&r.checkOut.time||null,location:r.checkIn&&r.checkIn.locName||r.checkOut&&r.checkOut.locName||'',
     empName: emp.name || (state.session&&state.session.name) || '',
     checkIn: r.checkIn ? fmtTime(r.checkIn.time) : '',
     checkOut: r.checkOut ? fmtTime(r.checkOut.time) : '',
     status: r.checkIn ? (isLate(r.checkIn.time,ws)?'Trễ':'Đúng giờ') : 'Vắng',
     overtime: fmtDur(overtimeMins(r.checkOut&&r.checkOut.time)),
+    overtimeMinutes:overtimeMins(r.checkOut&&r.checkOut.time),
     saidon: note.saidon || '',
     nhacnho: note.nhacnho || ''
   };
@@ -777,8 +779,8 @@ function mgrHistory(m){
   m.innerHTML=`
     <div class="field"><label>Chọn ngày</label><input type="date" id="h_date" value="${todayKey()}"></div>
     <div id="h_body"></div>
-    <button class="btn primary" id="h_sync" style="margin-top:14px">🔄 Đồng bộ ngày này lên Google Sheet</button>
-    <button class="btn dark" id="h_syncall" style="margin-top:10px">☁️ Đồng bộ TẤT CẢ (mọi ngày & nhân viên)</button>`;
+    <button class="btn primary" id="h_sync" style="margin-top:14px">⬆ Tải dữ liệu ngày này → Google Sheet & CHANG CHANG</button>
+    <button class="btn dark" id="h_syncall" style="margin-top:10px">⬆ Tải tất cả dữ liệu → Google Sheet & CHANG CHANG</button>`;
   const load=()=>{
     const dk=val('h_date');
     db.ref(`records/${dk}`).once('value').then(snap=>{
@@ -807,8 +809,8 @@ function syncDay(dk,recs){
   });
   if(!records.length) return toast('Chưa có nhân viên nào');
   toast('Đang đồng bộ…');
-  syncToSheet({records}).then(()=>toast('✅ Đã đồng bộ lên Google Sheet'))
-    .catch(()=>toast('⚠️ Lỗi đồng bộ, kiểm tra lại link'));
+  syncToSheet({records}).then(()=>toast('✅ Đã gửi Google Sheet và web CHANG CHANG'))
+    .catch(e=>toast('⚠️ '+e.message));
 }
 // Đồng bộ TẤT CẢ nhân viên của MỌI ngày
 function syncAll(){
@@ -829,10 +831,10 @@ function syncAll(){
 function sendBatches(records,i,total){
   const SIZE=300;
   const chunk=records.slice(i,i+SIZE);
-  if(!chunk.length){ toast('✅ Đã đồng bộ tất cả ('+total+' dòng)'); return; }
+  if(!chunk.length){ toast('✅ Đã gửi cả Google Sheet & CHANG CHANG ('+total+' dòng)'); return; }
   syncToSheet({records:chunk})
     .then(()=>sendBatches(records,i+SIZE,total))
-    .catch(()=>toast('⚠️ Lỗi đồng bộ, kiểm tra lại link'));
+    .catch(e=>toast('⚠️ '+e.message));
 }
 
 // --- Nhân viên ---
@@ -962,6 +964,11 @@ if('serviceWorker' in navigator){
       setInterval(()=>reg.update(), 60000);    // kiểm tra bản mới mỗi 60 giây
     }).catch(()=>{});
   });
+}
+
+// Xuất danh sách tối thiểu cho web quản lý; không xuất PIN, config hoặc tọa độ GPS.
+async function exportForChang(all=false,mine=false){
+ try{if(!state.session)throw Error('Cần đăng nhập');if(!mine&&state.session.role!=='ql')throw Error('Chỉ quản lý xuất dữ liệu chung');let dk=(document.getElementById('h_date')||{}).value||todayKey(),days={};if(mine){let snap=await db.ref('records/'+todayKey()+'/'+state.session.empId).once('value');days[todayKey()]={[state.session.empId]:snap.val()||{}};}else if(all){days=(await db.ref('records').once('value')).val()||{};}else{days[dk]=(await db.ref('records/'+dk).once('value')).val()||{};}let records=[];for(let [date,recs] of Object.entries(days))for(let [empId,r] of Object.entries(recs||{})){if(!r)continue;records.push({date,empId,empName:(state.employees[empId]||{}).name||empId,checkInTs:r.checkIn&&r.checkIn.time||null,checkOutTs:r.checkOut&&r.checkOut.time||null,breakMinutes:0,location:r.checkIn&&r.checkIn.locName||r.checkOut&&r.checkOut.locName||'',note:[r.note&&r.note.saidon,r.note&&r.note.nhacnho].filter(Boolean).join(' · ')});}if(!records.length)throw Error('Không có dữ liệu');let payload={format:'changchang-attendance-v1',exportedAt:new Date().toISOString(),records},url=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download='CHANG-CHANG-cham-cong-'+(all?'tat-ca':dk)+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1500);toast('Đã tải file. Mở web quản lý → Nhân sự → Tải dữ liệu chấm công → chọn file JSON.');}catch(e){toast('Không xuất được: '+e.message)}
 }
 </script>
 </body>
